@@ -1,0 +1,958 @@
+---
+title: "NHANES-2015-2016"
+author: "Elena Colicino, Michele Salerno"
+date: "2025-04"
+output: html_document
+---
+
+\
+```{r results='asis', echo=FALSE}
+cat("
+## Download NHANES Datasets
+1. [Download Demographic dataset](https://wwwn.cdc.gov/Nchs/Data/Nhanes/Public/2015/DataFiles/DEMO_I.xpt)
+2. [Download Phthalates dataset](https://wwwn.cdc.gov/Nchs/Data/Nhanes/Public/2015/DataFiles/PHTHTE_I.xpt)
+3. [Download Creatine/Albumin dataset](https://wwwn.cdc.gov/Nchs/Data/Nhanes/Public/2015/DataFiles/ALB_CR_I.xpt)
+4. [Download Antibody dataset](https://wwwn.cdc.gov/Nchs/Data/Nhanes/Public/2015/DataFiles/SSPT_I.xpt)
+")
+```
+\
+
+# Dataset import
+
+\
+```{r}
+#packages
+library(haven)
+library(dplyr)
+library(tidyr)
+library(DT)
+library(htmltools)
+library(skimr)
+library(Hmisc)
+library(knitr)
+library(kableExtra)
+library(ggplot2)
+library(htmlwidgets)
+library(plotly)
+
+library(qgcomp)
+library(bkmr)
+library(FactoMineR)
+library(factoextra)
+
+library(data.table)
+library(infinitefactor)
+library(reshape2)
+
+# ---- Define your data folder path ----
+path.data = 'your/path/to/data/folder/'
+#Demographic dataset
+data_demo = read_xpt(paste0(path.data,"DEMO_I.XPT"))
+
+#focus on children <18y
+demo_under_18 = data_demo %>%
+  filter(RIDAGEYR < 18) %>%
+  select(SEQN, RIDAGEYR, RIAGENDR, RIDRETH1, RIDRETH3, INDFMPIR)
+datatable(
+  demo_under_18,
+  extensions = 'Buttons',  
+  options = list(
+    dom = 'Bfrtip',  
+    buttons = c('copy', 'csv', 'excel', 'print'),  
+    pageLength = 10  
+  ),
+  rownames = FALSE
+)
+
+#Phthalates Dataset
+data_phthalates = read_xpt(paste0(path.data,"PHTHTE_I.XPT"))
+
+#Creatine/Albumin Dataset
+data_creatine = read_xpt(paste0(path.data,"ALB_CR_I.XPT"))
+
+#Antibody Dataset - tetanus and pertussis
+data_antibody = read_xpt(paste0(path.data,"SSPT_I.XPT"))
+
+#Merged dataset
+merged_data = demo_under_18 %>%
+  inner_join(data_phthalates, by = "SEQN") %>%
+  inner_join(data_creatine, by = "SEQN") %>%
+  inner_join(data_antibody, by = "SEQN") %>%
+  drop_na()
+
+#Create a single categorical variable for race/ethnicity
+merged_data <- merged_data %>%
+  mutate(
+    RIDRETH3_recat = case_when(
+      RIDRETH3 == 3 ~ "White",
+      RIDRETH3 == 4 ~ "Black",
+      RIDRETH3 %in% c(1, 2) ~ "Hispanic",
+      RIDRETH3 %in% c(6, 7) ~ "Others"
+    ) %>%
+    factor(levels = c("White", "Black", "Hispanic", "Others"))
+  ) %>%
+  filter(RIDRETH3_recat != "Others") %>%
+  mutate(RIDRETH3_recat = droplevels(RIDRETH3_recat))
+```
+\
+
+# Descriptive Analysis
+
+## Demographic variables
+
+\
+```{r}
+# Age and Income
+skim_without_charts(merged_data %>% select(RIDAGEYR, INDFMPIR))
+
+# Age as categorical
+merged_data <- merged_data %>%
+  mutate(age_category = case_when(
+    RIDAGEYR >= 6 & RIDAGEYR <= 9 ~ "6-9",
+    RIDAGEYR >= 10 & RIDAGEYR <= 13 ~ "10-13",
+    RIDAGEYR >= 14 & RIDAGEYR <= 17 ~ "14-17",
+    TRUE ~ NA_character_
+  ))
+
+table(merged_data$age_category)
+
+# Gender (1 = boys, 2 = girls)
+table(merged_data$RIAGENDR)
+
+# Ethnicity
+table(merged_data$RIDRETH3_recat)                   
+```
+\
+
+## Descriptive statistics antibodies for tetanus and pertussis 
+
+\
+```{r}
+skim_without_charts(merged_data[, c("SSTT", "SSPT")])
+```
+\
+
+# Phthalates adjusted for urine dilution: creatinine levels
+
+\
+```{r}
+selected_vars = merged_data[, c(
+                    "URXCNP","URXCOP","URXECP","URXHIBP","URXMBP","URXMC1",
+                    "URXMCOH","URXMEP","URXMHBP","URXMHH","URXMHNC","URXMHP",
+                    "URXMIB","URXMNP","URXMOH","URXMZP")]
+adjusted_vars = selected_vars / merged_data$URXUCR
+colnames(adjusted_vars) = paste0(colnames(adjusted_vars), "_adjusted")
+merged_data1 = cbind(merged_data[,c("SEQN","RIDAGEYR","RIAGENDR","RIDRETH1","RIDRETH3","INDFMPIR", "RIDRETH3_recat",
+                                    "SSPT", "SSTT")], adjusted_vars) 
+
+skim_without_charts(merged_data1[, colnames(adjusted_vars)]) 
+```
+\
+
+# Box-plot
+
+## Box-plot antibody
+
+\
+```{r}
+antibodies <- c("SSPT", "SSTT")
+log_data_antibodies <- merged_data1 %>%
+  select(all_of(antibodies)) %>%
+  mutate(across(everything(), ~ log2(.))) %>%
+  pivot_longer(cols = everything(), 
+               names_to = "Antibody", values_to = "Log_Value") %>%
+  mutate(Antibody = gsub("_adjusted", "", Antibody))
+
+ggplot(log_data_antibodies, aes(x = Antibody, y = Log_Value)) +
+  geom_boxplot(fill = NA) +  
+  labs(x = "Antibodies", 
+       y = "Log2(Concentration) (ng/mL)", 
+       title = "Boxplot of Antibodies (Log2 Transformed)") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    axis.text.x = element_text(angle = 45, hjust = 1, face = "bold", size = 10),
+    axis.text.y = element_text(size = 8)
+  )
+```
+\
+
+\
+```{r}
+merged_data1$Female = factor(ifelse(merged_data1$RIAGENDR == 2, 1, 0), levels=c(0,1))
+```
+\
+
+\
+```{r}
+# phthalates log2 transformed
+merged_data1 = merged_data1 %>%
+  mutate(across(all_of(colnames(adjusted_vars)), 
+                ~ log2(.), 
+                .names = "{.col}_log"))
+
+# antibody log2 transformed
+merged_data1 = merged_data1 %>%
+  mutate(across(all_of(antibodies), 
+                ~ log2(.), 
+                .names = "{.col}_log"))
+
+```
+\
+
+## Outliers check
+
+\
+```{r}
+detect_outliers = function(x) {
+  Q1 = quantile(x, 0.25, na.rm = TRUE)
+  Q3 = quantile(x, 0.75, na.rm = TRUE)
+  IQR = Q3 - Q1
+  lower_limit = Q1 - 3 * IQR
+  upper_limit = Q3 + 3 * IQR
+  outliers = which(x < lower_limit | x > upper_limit)
+  return(outliers)
+}
+
+all_outliers = c()
+
+for (phthalate in colnames(adjusted_vars)) {
+  phthalate_log = paste0(phthalate, "_log")
+  outliers_phthalate = detect_outliers(merged_data1[[phthalate_log]])
+  all_outliers = c(all_outliers, outliers_phthalate)
+  cat("Outliers in", phthalate_log, ": ", outliers_phthalate, "\n")
+}
+
+for (antibody in antibodies) {
+  antibody_log = paste0(antibody, "_log")
+  outliers_antibody = detect_outliers(merged_data1[[antibody_log]])
+  all_outliers = c(all_outliers, outliers_antibody)
+  cat("Outliers in", antibody_log, ": ", outliers_antibody, "\n")
+}
+
+all_outliers = unique(all_outliers)
+merged_data1 = merged_data1[-all_outliers, ]
+```
+\
+
+# LINEAR ANALYSIS
+
+\
+```{r}
+# SSPT (Pertussis toxin antibody)
+
+antibody_vars <- c("SSPT")
+
+coefficients_summary <- data.frame(
+  Number = integer(),
+  Antibody = character(),
+  Phthalate = character(),
+  Coefficient = numeric(),
+  `Std. Error` = numeric(),
+  `p-value` = numeric(),
+  `Lower_Confidence` = numeric(),
+  `Upper_Confidence` = numeric(),
+  p_adjusted_fdr = numeric(),
+  stringsAsFactors = FALSE
+)
+
+for (antibody in antibody_vars) {
+  
+  p_values <- c() 
+
+  for (i in 1:length(colnames(adjusted_vars))) {
+    phthalate <- colnames(adjusted_vars)[i]
+
+    phthalate_log <- paste0(phthalate, "_log")
+
+    formula <- as.formula(
+      paste0(
+        antibody, "_log ~ ", phthalate_log,
+        " + RIDAGEYR + Female + RIDRETH3_recat + INDFMPIR"
+      )
+    )
+
+    model <- lm(formula, data = merged_data1)
+
+    phthalate_coefficient <- summary(model)$coefficients[phthalate_log, 1]
+    phthalate_se <- summary(model)$coefficients[phthalate_log, 2]
+    phthalate_p <- summary(model)$coefficients[phthalate_log, 4]
+    conf_interval <- confint(model, level = 0.95)[phthalate_log, ]
+
+    p_values <- c(p_values, phthalate_p) 
+
+    row_to_add <- data.frame(
+      Number = i,
+      Antibody = antibody,
+      Phthalate = phthalate,
+      Coefficient = phthalate_coefficient,
+      `Std. Error` = phthalate_se,
+      `p-value` = phthalate_p,
+      `Lower_Confidence` = conf_interval[1],
+      `Upper_Confidence` = conf_interval[2],
+      p_adjusted_fdr = NA, 
+      stringsAsFactors = FALSE
+    )
+
+    coefficients_summary <- rbind(coefficients_summary, row_to_add)
+  }
+
+  adjusted_p_values <- p.adjust(p_values, method = "fdr")
+  coefficients_summary$p_adjusted_fdr[
+    coefficients_summary$Antibody == antibody
+  ] <- adjusted_p_values
+}
+
+datatable(
+  coefficients_summary,
+  extensions = 'Buttons',  
+  options = list(
+    dom = 'Bfrtip',  
+    buttons = c('copy', 'csv', 'excel', 'print'),  
+    pageLength = 10
+  ),
+  rownames = FALSE
+)
+
+
+coefficients_summary$Coefficient = ((2^(coefficients_summary$Coefficient))-1)*100
+coefficients_summary$Lower_Confidence = ((2^(coefficients_summary$Lower_Confidence))-1)*100
+coefficients_summary$Upper_Confidence = ((2^(coefficients_summary$Upper_Confidence))-1)*100
+
+
+datatable(
+  coefficients_summary,
+  extensions = 'Buttons',  
+  options = list(
+    dom = 'Bfrtip',  
+    buttons = c('copy', 'csv', 'excel', 'print'),
+    pageLength = 10
+  ),
+  rownames = FALSE
+)
+```
+\
+
+## Forest plot
+
+\
+```{r}
+for (antibody in antibody_vars) {
+  data_subset = coefficients_summary %>% filter(Antibody == antibody)
+  
+  if (nrow(data_subset) > 0) {
+    plot = ggplot(data_subset, aes(x = reorder(Phthalate, Coefficient), y = Coefficient)) +
+      geom_point(size = 3, color = "#3CB371") +
+      geom_errorbar(aes(ymin = Lower_Confidence, ymax = Upper_Confidence), 
+                    width = 0.2, color = "#3CB371") +
+      geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +  
+      coord_flip() +
+      theme_minimal() +
+      labs(
+        title = paste("Forest Plot for Antibody:", antibody),
+        x = "Phthalates",
+        y = "Coefficient (95% CI)"
+      )
+    
+    print(plot)
+  } 
+}
+```
+
+\
+
+# QUANTILE G-COMPUTATION APPROACH
+
+\
+```{r}
+Xnm <- c("URXMEP_adjusted_log", "URXMBP_adjusted_log", "URXMIB_adjusted_log",
+         "URXHIBP_adjusted_log", "URXMC1_adjusted_log", "URXMHBP_adjusted_log", 
+         "URXMZP_adjusted_log", "URXMHH_adjusted_log", "URXMOH_adjusted_log", 
+         "URXECP_adjusted_log", "URXMCOH_adjusted_log", "URXCNP_adjusted_log",
+         "URXCOP_adjusted_log", "URXMHNC_adjusted_log", "URXMNP_adjusted_log",
+         "URXMHP_adjusted_log"
+)
+covars = c("RIDAGEYR", "Female", "RIDRETH3_recat", "INDFMPIR")
+
+### Quadratic
+sspt_quadr = qgcomp.glm.boot(
+  SSPT_log ~ RIDAGEYR + Female + RIDRETH3_recat + INDFMPIR + . + .^2,
+  expnms = Xnm,
+  data = merged_data1,
+  family = gaussian(),
+  q = 10,
+  B = 1000,
+  degree = 2
+)
+
+summary(sspt_quadr)
+plot(sspt_quadr)
+
+### Quadratic
+sspt_quadr = qgcomp.glm.noboot(SSPT_log ~ RIDAGEYR + Female + RIDRETH3_recat + INDFMPIR + . + .^2, 
+       expnms = Xnm, 
+       data = merged_data1[, c(Xnm, 'SSPT_log', 'RIDAGEYR', 'Female', 'RIDRETH3_recat', 'INDFMPIR')], 
+       family = gaussian(), 
+       q = 10)
+summary(sspt_quadr)
+plot(sspt_quadr)
+
+```
+\
+
+# BKMR
+
+# SSPT
+
+\
+```{r}
+y = merged_data1$SSPT_log
+
+Z = scale(merged_data1 %>%
+            select(URXMEP_adjusted_log, URXMBP_adjusted_log, URXMIB_adjusted_log, 
+                  URXHIBP_adjusted_log, URXMC1_adjusted_log, URXMHBP_adjusted_log, 
+                  URXMZP_adjusted_log, URXMHH_adjusted_log, URXMOH_adjusted_log, 
+                  URXECP_adjusted_log, URXMCOH_adjusted_log, URXCNP_adjusted_log, 
+                  URXCOP_adjusted_log, URXMHNC_adjusted_log, URXMNP_adjusted_log, URXMHP_adjusted_log))
+
+X = merged_data1 %>%
+  mutate(
+    RIDAGEYR = scale(RIDAGEYR),  
+    INDFMPIR = scale(as.numeric(INDFMPIR)),  
+    Female = as.numeric(as.character(Female)),
+    RIDRETH3_recat = scale(as.numeric(RIDRETH3_recat))
+  ) %>%
+  select(RIDAGEYR, Female, INDFMPIR, RIDRETH3_recat)
+```
+\
+
+\
+```{r}
+# model
+set.seed(123)
+fitkm = kmbayes(y = y, Z = Z, X = X, iter = 10000, verbose = TRUE, varsel = TRUE)
+```
+\
+
+## Trace plot
+
+Let's print trace plots to check convergence:
+
+\
+```{r}
+# Trace plot for coefficients of the covariates
+TracePlot(fit = fitkm, par = "beta")
+# Trace plot for residual variance
+TracePlot(fit = fitkm, par = "sigsq.eps")
+# Trace plot for the relevance of exposures
+TracePlot(fit = fitkm, par = "r", comp = 1)
+```
+\
+
+## PIP
+
+Estimated posterior inclusion probabilities:
+
+\
+```{r}
+ExtractPIPs(fitkm)
+```
+\
+
+**Interpretation of PIPs**:
+
+- If the PIP of a variable is 1.0000, it means that that variable was included in all iterations of posterior sampling and thus was selected as relevant.
+
+- If the PIP is low (e.g., 0.10), the variable was included in only a few iterations and therefore has less influence on the model.
+
+# Summarize model output
+
+\
+```{r}
+pred.resp.univar <- PredictorResponseUnivar(fit = fitkm)
+```
+\
+
+\
+```{r}
+ggplot(pred.resp.univar, aes(z, est, ymin = est - 1.96*se, ymax = est + 1.96*se)) +  
+  geom_smooth(stat = "identity") +  
+  facet_wrap(~ variable, labeller = labeller(variable = function(x) gsub("_adjusted_log", "", x))) +  
+  ylab("h(z)")
+```
+\
+
+## Summary statistics of the predictor-response function
+
+Overall risk (overall risk) associated with exposures (Z) in the BKMR model.
+
+\
+```{r}
+X_clean = data.frame(lapply(X, function(col) {
+  attributes(col) <- NULL
+  return(col)
+}))
+
+risks.overall <- OverallRiskSummaries(
+  fit = fitkm, 
+  y = y, 
+  Z = Z, 
+  X = as.matrix(X_clean),
+  qs = seq(0.25, 0.75, by = 0.05), 
+  q.fixed = 0.5, 
+  method = "exact"
+)
+print(risks.overall)
+```
+\
+
+\
+```{r}
+ggplot(risks.overall, aes(quantile, est, ymin = est - 1.96*sd, ymax = est + 1.96*sd)) + 
+    geom_pointrange()
+```
+\
+
+### Individual predictors
+
+Summary analysis of the risks associated with individual predictors (Z) in the BKMR model, calculating the risk associated with a single predictor at different levels (percentiles) of the other predictors. 
+
+\
+```{r}
+X_clean = data.frame(lapply(X, function(col) {
+  attributes(col) <- NULL
+  return(col)
+}))
+
+risks.singvar = SingVarRiskSummaries(
+  fit = fitkm, 
+  y = y, 
+  Z = Z, 
+  X = as.matrix(X_clean), 
+  qs.diff = c(0.25, 0.75), 
+  q.fixed = c(0.25, 0.50, 0.75), 
+  method = "exact"
+)
+print(risks.singvar)
+```
+\
+
+\
+```{r}
+ggplot(risks.singvar, aes(variable, est, ymin = est - 1.96*sd, 
+                          ymax = est + 1.96*sd, col = q.fixed)) + 
+    geom_pointrange(position = position_dodge(width = 0.75)) + 
+  coord_flip()
+```
+\
+
+### Interaction effects
+
+Estimating and visualizing the interaction effects between a single predictor and all other predictors in the BKMR model.
+
+\
+```{r}
+X_clean = data.frame(lapply(X, function(col) {
+  attributes(col) <- NULL
+  return(col)
+}))
+
+risks.int = SingVarIntSummaries(
+  fit = fitkm, 
+  y = y, 
+  Z = Z, 
+  X = as.matrix(X_clean), 
+  qs.diff = c(0.25, 0.75), 
+  qs.fixed = c(0.25, 0.75), 
+  method = "exact" 
+)
+print(risks.int)
+```
+\
+
+# Bayesian Infinite Factor Models
+
+\
+```{r}
+merged_data1 = merged_data1 %>%
+  mutate(
+    Ethnicity_code = case_when(
+      RIDRETH3_recat == "White" ~ 1,
+      RIDRETH3_recat == "Black" ~ 2,
+      RIDRETH3_recat == "Hispanic" ~ 3,
+    )
+  ) 
+```
+\
+
+## PCA
+
+\
+```{r}
+phthalates_scaled = scale(merged_data1 %>% select(all_of(colnames(adjusted_vars))))
+
+# PCA
+pca_results = PCA(phthalates_scaled, graph = FALSE)
+
+eig_vals <- pca_results$eig
+var_explained <- eig_vals[, 2]
+
+cum_var_explained <- cumsum(var_explained)
+
+# Scree plot -> elbow point
+fviz_eig(pca_results, addlabels = TRUE, ylim = c(0, 50))
+
+# To find the number of components that explain at least 50% of the variance
+n_components <- which(cum_var_explained >= 50)[1] 
+cat("Number of factors to consider:", n_components, "\n")
+
+summary(pca_results)
+
+# Variance Explained and Cumulative Variance
+data.frame(Component = 1:length(var_explained),
+           Variance_Explained = var_explained,
+           Cumulative_Variance = cum_var_explained)
+```
+\
+
+\[
+\boldsymbol{\beta}_X = \mathbf{\Lambda} \cdot \boldsymbol{\omega}
+\]
+
+where:
+
+- $\mathbf{\Lambda}$ is the **factor loading matrix** ($p \times k$), with:
+  - $p$ = number of metabolites (observed variables),
+  - $k$ = number of latent factors.
+
+- $\boldsymbol{\omega}$ is the **regression coefficient vector** ($k \times 1$) obtained from the regression $y \sim \text{latent factors}$.
+
+Thus, the estimated effect for each metabolite $i$ is:
+
+\[
+\beta_{X_i} = \sum_{j=1}^{k} \lambda_{ij} \cdot \omega_j
+\]
+
+where:
+- $\lambda_{ij}$ represents the loading of metabolite $i$ on latent factor $j$,
+- $\omega_j$ is the estimated regression coefficient for factor $j$.
+
+## SSPT
+
+\
+```{r}
+# Creating the X matrix
+setDT(merged_data1)
+
+phthalates = c(
+  "URXMEP_adjusted_log", "URXMBP_adjusted_log", "URXMIB_adjusted_log", 
+  "URXHIBP_adjusted_log", "URXMC1_adjusted_log", "URXMHBP_adjusted_log", 
+  "URXMZP_adjusted_log", "URXMHH_adjusted_log", "URXMOH_adjusted_log", 
+  "URXECP_adjusted_log", "URXMCOH_adjusted_log", "URXCNP_adjusted_log", 
+  "URXCOP_adjusted_log", "URXMHNC_adjusted_log", "URXMNP_adjusted_log", "URXMHP_adjusted_log"
+)
+
+merged_data1[, ':='(
+  white = ifelse(Ethnicity_code == 1, 1, 0),
+  black = ifelse(Ethnicity_code == 2, 1, 0),
+  hispanic = ifelse(Ethnicity_code == 3, 1, 0)
+)]
+
+merged_data1$Female <- as.numeric(merged_data1$Female)
+
+y = as.matrix(merged_data1$SSPT_log)
+
+X = as.matrix(merged_data1[, .SD, .SDcols = c(phthalates, "RIDAGEYR", "Female", "INDFMPIR", "black", "hispanic")])
+
+covariates = c("RIDAGEYR", "Female", "INDFMPIR", "black", "hispanic")
+
+#print(X)
+```
+\
+
+\
+```{r}
+set.seed(123)
+
+nrun = 10000
+burn = 3000
+thin = 10
+k = 2
+intdl = interactionDL(y = y, X = X, nrun = nrun, burn = burn, thin = thin, k = k)
+```
+\
+
+\
+```{r}
+# Rotate 
+Rotout = jointRot(intdl$lambdaSamps, intdl$etaSamps)
+mLambda = lmean(Rotout$lambda)
+rownames(mLambda) = colnames(X)
+
+dim(Rotout$lambda[[1]]) 
+
+# Create an array with all the simulation 
+aLambda = array(NA, dim = c(21, 2, 9)) 
+for(i in 1:9){
+  aLambda[,,i] = Rotout$lambda[[i]][, 1:2]
+}
+
+# Calculate quantile for each component in the factor
+aLambdaq1 = apply(aLambda, c(1,2), quantile, c(0.025))
+aLambdaq2 = apply(aLambda, c(1,2), quantile, c(0.975))
+
+mLambda1 = as.data.table(mLambda)
+setnames(mLambda1,names(mLambda1),paste0("factor_",1:2))
+mLambda1[,names := colnames(X)]
+
+aLambdaq1 = as.data.table(aLambdaq1)
+setnames(aLambdaq1,names(aLambdaq1),paste0("factor_",1:2))
+aLambdaq1[,names := colnames(X)]
+
+aLambdaq2 = as.data.table(aLambdaq2)
+setnames(aLambdaq2,names(aLambdaq2),paste0("factor_",1:2))
+aLambdaq2[,names := colnames(X)]
+
+mLambda1 = melt(mLambda1)
+aLambdaq1 = melt(aLambdaq1)
+aLambdaq2 = melt(aLambdaq2)
+
+mLambda1 = as.data.table(mLambda1)
+aLambdaq1 = as.data.table(aLambdaq1)
+aLambdaq2 = as.data.table(aLambdaq2)
+
+aLambdaq1 = aLambdaq1[,.(names, variable=as.character(variable), value)]
+mLambda1 = mLambda1[,.(names, variable=as.character(variable), value)]
+aLambdaq2 = aLambdaq2[,.(names, variable=as.character(variable), value)]
+
+# Table of the loadings  
+data = Reduce(function(x, y) merge(x, y, 
+    by=c("names", "variable")), list(aLambdaq1,mLambda1,aLambdaq2))
+data[,check := ifelse(sign(value.x) == sign(value),1,0)]
+setnames(data,names(data),c("Metabolite","Factor","q025","mean","q975","sig"))
+data[order(sig,decreasing = T)]
+```
+\
+
+\
+```{r}
+# Filter significant metabolites only
+significant_loadings = data[q025 > 0 | q975 < 0]
+significant_loadings = significant_loadings[Metabolite %in% phthalates]
+
+# Sort by value
+significant_loadings = significant_loadings[order(Factor, -abs(mean))]
+significant_loadings
+```
+\
+
+\
+```{r}
+# Heatmap
+heatmap_data = significant_loadings[, .(Metabolite, Factor, mean)]
+heatmap_matrix = dcast(heatmap_data, Metabolite ~ Factor, value.var = "mean")
+
+ggplot(melt(heatmap_matrix, id.vars = "Metabolite"), aes(x = variable, y = Metabolite, fill = value)) +  
+  geom_tile(colour = "grey20") +  
+  scale_fill_gradient2(low = "#3d52bf", high = "#33961b", mid = "white", midpoint = 0) +  
+  theme_minimal() +  
+  labs(x = "Factor", y = "Metabolite", fill = "Loading") +  
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.text = element_text(size = 8),
+        legend.title = element_text(),
+        plot.title = element_text(hjust = 0.5)) +  
+  ggtitle("Heatmap of Significant Factor Loadings")
+```
+\
+
+### Estimated Main Effects
+
+\
+```{r}
+# Find Estimated Main Effects
+
+# Convert list to 3D array: (iterations, individuals, factors)
+factors_array = simplify2array(intdl$etaSamps)  # (387, 2, 9)
+
+# Check dimension
+#dim(factors_array)  
+
+# Calculate the mean over the MCMC samples to obtain a matrix (387 individuals × 2 factors)
+factors_matrix = apply(factors_array, c(1, 2), mean)
+
+# Check matrix dimension's
+#dim(factors_matrix) 
+
+# Converts to dataframe for regression
+factors_df = as.data.frame(factors_matrix)
+colnames(factors_df) = paste0("Factor_", 1:ncol(factors_df))
+
+# Regression of the variable of interest (y) on the latent factors (omega)
+lm_results = lm(y ~ ., data = cbind(y = y, factors_df))
+
+summary(lm_results)
+```
+\
+
+\[
+\boldsymbol{\beta}_X = \mathbf{\Lambda} \cdot \boldsymbol{\omega}
+\]
+
+where:
+
+- $\mathbf{\Lambda}$ is the **factor loading matrix** ($p \times k$), with:
+  - $p$ = number of metabolites (observed variables),
+  - $k$ = number of latent factors.
+
+- $\boldsymbol{\omega}$ is the **regression coefficient vector** ($k \times 1$) obtained from the regression $y \sim \text{latent factors}$.
+
+Thus, the estimated effect for each metabolite $i$ is:
+
+\[
+\beta_{X_i} = \sum_{j=1}^{k} \lambda_{ij} \cdot \omega_j
+\]
+
+where:
+- $\lambda_{ij}$ represents the loading of metabolite $i$ on latent factor $j$,
+- $\omega_j$ is the estimated regression coefficient for factor $j$.
+
+\
+```{r}
+omega_estimates = coef(lm_results)[-1]
+# Make sure omega_estimates is a column matrix (2 x 1)
+omega_estimates = matrix(omega_estimates, ncol = 1)
+
+# Estimated Main Effects
+beta_X_estimates = mLambda %*% omega_estimates # mLambda = Factor Loadings
+beta_X_estimates
+```
+\
+
+$\boldsymbol{\beta}_X$ represents the vector of **estimated main effects**, i.e., the associations between each **metabolite** and the outcome variable $y$. Thus, $\boldsymbol{\beta}_X$ allows us to **project the effects of latent factors onto the observed metabolites**, determining their estimated influence on the outcome variable.
+
+\
+```{r}
+# N MCMC iterations saved
+n_iter = length(Rotout$lambda)
+
+beta_X_samples = matrix(NA, nrow = n_iter, ncol = nrow(mLambda))
+
+# Loop MCMC iterations
+for (i in 1:n_iter) {
+  lambda_sample = Rotout$lambda[[i]][, 1:2]  
+  beta_X_samples[i, ] = lambda_sample %*% omega_estimates  
+}
+
+# Confidence intervals
+beta_X_mean = apply(beta_X_samples, 2, mean)      # mean
+beta_X_q025 = apply(beta_X_samples, 2, quantile, probs = 0.025)  # q25
+beta_X_q975 = apply(beta_X_samples, 2, quantile, probs = 0.975)  # q75
+
+beta_X_results = data.frame(
+  Metabolite = rownames(mLambda),
+  Beta = beta_X_mean,
+  IC_lower = beta_X_q025,
+  IC_upper = beta_X_q975
+)
+
+print(beta_X_results)
+```
+\
+
+\
+```{r}
+ggplot(beta_X_results, aes(x = Metabolite, y = Beta)) +
+  geom_point(color = "red", size = 3) +  
+  geom_errorbar(aes(ymin = IC_lower, ymax = IC_upper), width = 0.2, color = "red") +  
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey", linewidth = 1) +  
+  theme_minimal() +
+  labs(
+    x = "",
+    y = "Estimated Main Effects",
+    title = "Estimated Main Effects - SSPT"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)
+  )
+```
+\
+
+\
+```{r}
+# Quadratic term
+inter_m_mat = apply(intdl$omegaSamps, c(1,2), mean)
+inter_q1_mat = apply(intdl$omegaSamps, c(1,2), quantile, c(0.025))
+inter_q2_mat = apply(intdl$omegaSamps, c(1,2), quantile, c(0.975))
+
+inter_m_mat = as.data.table(inter_m_mat)
+inter_m_mat[,names := colnames(X)]
+setnames(inter_m_mat,names(inter_m_mat),c(colnames(X),"names"))
+inter_m_mat = melt(inter_m_mat)
+
+inter_q1_mat = as.data.table(inter_q1_mat)
+inter_q1_mat[,names := colnames(X)]
+setnames(inter_q1_mat,names(inter_q1_mat),c(colnames(X),"names"))
+inter_q1_mat = melt(inter_q1_mat)
+
+inter_q2_mat = as.data.table(inter_q2_mat)
+inter_q2_mat[,names := colnames(X)]
+setnames(inter_q2_mat,names(inter_q2_mat),c(colnames(X),"names"))
+inter_q2_mat = melt(inter_q2_mat)
+```
+\
+
+\
+```{r}
+inter_m_mat = as.data.table(inter_m_mat)
+inter_q1_mat = as.data.table(inter_q1_mat)
+inter_q2_mat = as.data.table(inter_q2_mat)
+
+data_inter = Reduce(function(x, y) merge(x, y, 
+    by=c("names", "variable")), list(inter_q1_mat[,.(names, variable=as.character(variable), value)],
+                                     inter_m_mat[,.(names, variable=as.character(variable), value)],
+                                     inter_q2_mat[,.(names, variable=as.character(variable), value)]))
+data_inter[,check := ifelse(sign(value.x) == sign(value),1,0)]
+
+data_inter_tmp = data_inter[names %in% phthalates & variable %in% phthalates]
+data_inter_tmp[, value_plot := ifelse(check == 0, NA, value.y)]
+setkey(data_inter_tmp,names,variable)
+```
+\
+
+\
+```{r}
+ggplot(data_inter_tmp, aes(names, variable, fill = value_plot)) + 
+  geom_tile() +
+  scale_y_discrete(limits = unique(data_inter_tmp$names)) +
+  scale_x_discrete(limits = rev(unique(data_inter_tmp$names))) +
+  scale_fill_gradient2(low = "#f4d219", mid = "#99CCFF", high = "#336699") +
+  ggtitle("Interaction Metabolites") +
+  labs(x = "", y = "") +
+  theme(plot.title = element_text(hjust = 0.5),
+        panel.background = element_blank(),
+        panel.grid = element_blank(),
+        axis.text.x = element_text(size = 6, angle = 90, hjust = 0.95, vjust = 0.2),
+        axis.text.y = element_text(size = 6))
+```
+\
+
+### Interactions Phthalates-Covariates
+
+\
+```{r}
+data_inter_tmp = data_inter[names %in% phthalates & variable %in% c("RIDAGEYR", "Female", "INDFMPIR", "black", "hispanic", "chol", "creatinine")]
+
+#Only significant interactions (those that do not include 0 in the 99% CI)
+data_inter_tmp[, value_plot := ifelse(check == 0, NA, value.y)]
+
+ggplot(data_inter_tmp, aes(x = variable, y = names, fill = value_plot)) +  
+  geom_tile(color = "grey20") +  
+  scale_fill_gradient2(low = "#3d52bf", mid = "white", high = "#33961b") +  
+  labs(x = "Covariate", y = "Phthalate", fill = "Interaction Coefficient") +  
+  theme_minimal() +  
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+        axis.text.y = element_text(size = 10),
+        plot.title = element_text(hjust = 0.5)) +  
+  ggtitle("Significant Interactions Phthalates-Covariates")
+```
+\
